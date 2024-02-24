@@ -61,7 +61,7 @@ import { ChatflowPool } from './ChatflowPool'
 import { CachePool } from './CachePool'
 import { ICommonObject, IMessage, INodeOptionsValue, handleEscapeCharacters, webCrawl, xmlScrape } from 'flowise-components'
 import { createRateLimiter, getRateLimiter, initializeRateLimiter } from './utils/rateLimit'
-import { addAPIKey, compareKeys, deleteAPIKey, getApiKey, getAPIKeys, updateAPIKey } from './utils/apiKey'
+import { addAPIKey, compareKeys, deleteAPIKey, findAPIKey, getApiKey, getAPIKeys, updateAPIKey } from './utils/apiKey'
 import { sanitizeMiddleware, getCorsOptions, getAllowedIframeOrigins } from './utils/XSS'
 import axios from 'axios'
 import { Client } from 'langchainhub'
@@ -402,12 +402,39 @@ export class App {
         // Save chatflow
         this.app.post('/api/v1/chatflows', async (req: Request, res: Response) => {
             const body = req.body
+
+            // Create the chatflow
             const newChatFlow = new ChatFlow()
             Object.assign(newChatFlow, body)
-
             const chatflow = this.AppDataSource.getRepository(ChatFlow).create(newChatFlow)
-            const results = await this.AppDataSource.getRepository(ChatFlow).save(chatflow)
+            const chatflowResult = await this.AppDataSource.getRepository(ChatFlow).save(chatflow)
 
+            // Create the chatflow key
+            const keys = await addAPIKey(`Chatflow ${chatflowResult.name} - ${chatflowResult.id}`)
+            const lastKey = keys[keys.length - 1]
+            chatflow.apikeyid = lastKey.id
+            const results = await this.AppDataSource.getRepository(ChatFlow).save(chatflow)
+            // Update chatflow with key
+            // Save this Chatflow as a Sidekick in AnswerAI
+            // Include the API Key
+            try {
+                await fetch(process.env.ANSWERAI_DOMAIN + '/api/sidekicks/new', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: 'Bearer ' + process.env.ANSWERAI_API_KEY
+                    },
+                    body: JSON.stringify({
+                        chatflow: {
+                            ...results
+                        },
+                        chatflowDomain: `${process.env.DOMAIN}`,
+                        chatflowApiKey: lastKey.apiKey
+                    })
+                })
+            } catch (error) {
+                console.log('Syncing to Sidekick failed', error)
+            }
             await this.telemetry.sendTelemetry('chatflow_created', {
                 version: await getAppVersion(),
                 chatlowId: results.id,
@@ -444,13 +471,29 @@ export class App {
                 // Update chatflowpool inSync to false, to build Langchain again because data has been changed
                 this.chatflowPool.updateInSync(chatflow.id, false)
             }
-
+            try {
+                await fetch(process.env.ANSWERAI_DOMAIN + '/api/sidekicks/new', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: 'Bearer ' + process.env.ANSWERAI_API_KEY
+                    },
+                    body: JSON.stringify({
+                        chatflow: result,
+                        chatflowDomain: `${process.env.DOMAIN}`,
+                        chatflowApiKey: chatflow.apikeyid ? (await findAPIKey(chatflow.apikeyid))?.apiKey : ''
+                    })
+                })
+            } catch (error) {
+                console.log('Syncing to Sidekick failed', error)
+            }
             return res.json(result)
         })
 
         // Delete chatflow via id
         this.app.delete('/api/v1/chatflows/:id', async (req: Request, res: Response) => {
             const results = await this.AppDataSource.getRepository(ChatFlow).delete({ id: req.params.id })
+            // TODO: Report deleted chatflow to AnswerAI
             return res.json(results)
         })
 
